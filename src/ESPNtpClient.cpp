@@ -161,7 +161,7 @@ bool NTPClient::begin (const char* ntpServerName, bool manageWifi) {
         }
     }
 		
-		udp_mutex_lock();
+    udp_mutex_lock();
     if (udp) {
         DEBUGLOGI ("Remove UDP connection");
         udp_disconnect (udp);
