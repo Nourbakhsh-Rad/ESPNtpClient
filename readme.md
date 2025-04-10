@@ -18,7 +18,11 @@ ESPNtpClient do not have any external dependency.
 
 ----------------
 
-**Important**: This library task is only related to time synchronization and, as NTP protocol does, works using UTC time internally. All time management including local time conversion, time zones, daylight savings, etc. is done by Espressif sdk time subsystem that is based on GNU time C library. https://kirste.userpage.fu-berlin.de/chemnet/use/info/libc/libc_17.html
+**Important**: This library task is only related to time synchronization and, as NTP protocol does, works using UTC time internally. All time management including local time conversion, time zones, daylight savings, etc. is done by Espressif sdk time subsystem that is based on GNU time C library. https://web.archive.org/web/20210226233334/https://kirste.userpage.fu-berlin.de/chemnet/use/info/libc/libc_17.html
+
+----------
+
+**Note**: ESP32 and ESP8266 have their own SNTP clients into their respectives SDKs. So, unless you need additional accuracy that this library provides, it is always recommended to use ESP32 or ESP8266 SDKs.
 
 ----------
 
