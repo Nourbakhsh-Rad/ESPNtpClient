@@ -64,43 +64,33 @@ const char* IRAM_ATTR extractFileName (const char* path) {
 }
 #endif
 
-  /**
-    * @brief NTP Timestamp Format
-    * The prime epoch, or base date of era 0, is 0 h 1 January 1900 UTC, when all bits are zero
-    */
-typedef struct {
-    int32_t secondsOffset; ///< @brief 32-bit seconds field spanning 136 years since 1-Jan-1900 00:00 UTC
-    uint32_t fraction; ///< @brief 32-bit fraction field resolving 232 picoseconds (1/2^32)
-} timestamp64_t;
-
-  /**
-    * @brief Short NTP Timestamp Format
-    * 
-    * Used for precission, dispersion, etc
-    */
-typedef struct {
-    int16_t secondsOffset; ///< @brief 16-bit seconds field spanning 18 hours
-    uint16_t fraction; ///< @brief 16-bit fraction field resolving 15.3 microseconds (1/2^16)
-} timestamp32_t;
-
-
-typedef struct __attribute__ ((packed, aligned (1))) {
-    uint8_t flags;
-    uint8_t peerStratum;
-    uint8_t pollingInterval;
-    int8_t clockPrecission;
-    timestamp32_t rootDelay;
-    timestamp32_t dispersion;
-    uint8_t refID[4];
-    timestamp64_t reference;
-    timestamp64_t origin;
-    timestamp64_t receive;
-    timestamp64_t transmit;
-} NTPUndecodedPacket_t;
-
 NTPClient NTP;
 
 const int seventyYears = 2208988800UL; // From 1900 to 1970
+
+void udp_mutex_lock() {
+  #ifdef ESP32
+    #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
+      #ifdef CONFIG_LWIP_TCPIP_CORE_LOCKING
+        if (!sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+          LOCK_TCPIP_CORE();
+        }
+			#endif
+    #endif
+  #endif
+}
+
+void udp_mutex_unlock() {
+	#ifdef ESP32
+		#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
+      #ifdef CONFIG_LWIP_TCPIP_CORE_LOCKING
+        if (sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+          UNLOCK_TCPIP_CORE();
+        }
+      #endif
+		#endif
+	#endif
+}
 
 int32_t flipInt32 (int32_t number) {
     uint8_t output[sizeof (int32_t)];
@@ -170,7 +160,8 @@ bool NTPClient::begin (const char* ntpServerName, bool manageWifi) {
             setNtpServerName (DEFAULT_NTP_SERVER);
         }
     }
-
+		
+		udp_mutex_lock();
     if (udp) {
         DEBUGLOGI ("Remove UDP connection");
         udp_disconnect (udp);
@@ -178,32 +169,39 @@ bool NTPClient::begin (const char* ntpServerName, bool manageWifi) {
         udp = NULL;
     }
     
-
     udp = udp_new ();
+    udp_mutex_unlock();
+    
     if (!udp) {
         DEBUGLOGE ("Failed to create NTP socket");
         return false;
     }
     DEBUGLOGI ("NTP socket created");
     
-    if (WiFi.isConnected ()) {
+    if (connectionStatus ()) {
         ip_addr_t localAddress;
 #ifdef ESP32
-        localAddress.u_addr.ip4.addr = WiFi.localIP ();
+        localAddress.u_addr.ip4.addr = getDeviceIP ();
         localAddress.type = IPADDR_TYPE_V4;
-        DEBUGLOGI ("Bind UDP port %d to %s", DEFAULT_NTP_PORT, IPAddress (localAddress.u_addr.ip4.addr).toString ().c_str ());
+        DEBUGLOGI ("Bind UDP port %d to %s", DEFAULT_LOCAL_PORT, IPAddress (localAddress.u_addr.ip4.addr).toString ().c_str ());
 #else
-        localAddress.addr = WiFi.localIP ();
-        DEBUGLOGI ("Bind UDP port %d to %s", DEFAULT_NTP_PORT, IPAddress (localAddress.addr).toString ().c_str ());
+        localAddress.addr = getDeviceIP ();
+        DEBUGLOGI ("Bind UDP port %d to %s", DEFAULT_LOCAL_PORT, IPAddress (localAddress.addr).toString ().c_str ());
 #endif
-        result = udp_bind (udp, /*IP_ADDR_ANY*/ &localAddress, DEFAULT_NTP_PORT);
+        udp_mutex_lock();
+        result = udp_bind (udp, /*IP_ADDR_ANY*/ &localAddress, DEFAULT_LOCAL_PORT);
+        udp_mutex_unlock();
+        
         if (result) {
             DEBUGLOGE ("Failed to bind to NTP port. %d: %s", result, lwip_strerr (result));
+            udp_mutex_lock();
             if (udp) {
                 udp_disconnect (udp);
                 udp_remove (udp);
                 udp = NULL;
             }
+            udp_mutex_unlock();
+            
             isConnected = false;
             actualInterval = shortInterval;
             return false;
@@ -211,7 +209,9 @@ bool NTPClient::begin (const char* ntpServerName, bool manageWifi) {
             isConnected = true;
         }
         
+        udp_mutex_lock();
         udp_recv (udp, &NTPClient::s_recvPacket, this);
+        udp_mutex_unlock();
     }
     lastSyncd.tv_sec = 0;
     lastSyncd.tv_usec = 0;
@@ -237,7 +237,7 @@ bool NTPClient::begin (const char* ntpServerName, bool manageWifi) {
         xTaskCreateUniversal (
             &NTPClient::s_getTimeloop, /* Task function. */
             "NTP loop", /* name of task. */
-            2048, /* Stack size of task */
+            3072, /* Stack size of task */
             this, /* parameter of the task */
             1, /* priority of the task */
             &loopHandle, /* Task handle to keep track of created task */
@@ -388,6 +388,7 @@ void NTPClient::processPacket (struct pbuf* packet) {
         return;
     } else {
         numDispersionErrors = 0;
+        lastNtpPacket = ntpPacket;
         DEBUGLOGI ("Valid NTP response");
     }
 
@@ -528,20 +529,24 @@ void NTPClient::s_getTimeloop (void* arg) {
             lastGotTime = ::millis ();
             DEBUGLOGI ("Periodic loop. Millis = %d", lastGotTime);
             if (self->isConnected) {
-                if (WiFi.isConnected ()) {
+                if (connectionStatus ()) {
                     self->getTime ();
                 } else {
                     DEBUGLOGE ("DISCONNECTED");
+                    udp_mutex_lock();
                     if (self->udp) {
                         udp_disconnect (self->udp);
                         udp_remove (self->udp);
                         self->udp = NULL;
                     }
+                    udp_mutex_unlock();
                     self->isConnected = false;
                 }
             } else {
-                if (WiFi.isConnected ()) {
+                if (connectionStatus ()) {
                     DEBUGLOGD ("CONNECTED. Binding");
+                    
+                    udp_mutex_lock();
                     if (self->udp) {
                         udp_disconnect (self->udp);
                         udp_remove (self->udp);
@@ -549,6 +554,8 @@ void NTPClient::s_getTimeloop (void* arg) {
                     }
 
                     self->udp = udp_new ();
+                    udp_mutex_unlock();
+                    
                     if (!self->udp) {
                         DEBUGLOGE ("Failed to create NTP socket");
                         return; // false;
@@ -556,28 +563,37 @@ void NTPClient::s_getTimeloop (void* arg) {
 
                     ip_addr_t localAddress;
 #ifdef ESP32
-                    localAddress.u_addr.ip4.addr = WiFi.localIP ();
+                    localAddress.u_addr.ip4.addr = getDeviceIP ();
                     localAddress.type = IPADDR_TYPE_V4;
 #else // ESP8266
-                    localAddress.addr = WiFi.localIP ();
+                    localAddress.addr = getDeviceIP ();
 #endif // ESP32
-                    err_t result = udp_bind (self->udp, /*IP_ADDR_ANY*/ &localAddress, DEFAULT_NTP_PORT);
+                    udp_mutex_lock();
+                    err_t result = udp_bind (self->udp, /*IP_ADDR_ANY*/ &localAddress, DEFAULT_LOCAL_PORT);
+                    udp_mutex_unlock();
+                    
                     DEBUGLOGI ("Bind UDP port");
                     if (result) {
                         DEBUGLOGE ("Failed to bind to NTP port. %d: %s", result, lwip_strerr (result));
+                        
+                        udp_mutex_lock();
                         if (self->udp) {
                             udp_disconnect (self->udp);
                             udp_remove (self->udp);
                             self->udp = NULL;
                         }
-
+                        udp_mutex_unlock();
+                        
                         self->isConnected = false;
                         //return; //false;
                     } else {
                         self->isConnected = true;
                     }
 
+                    udp_mutex_lock();
                     udp_recv (self->udp, &NTPClient::s_recvPacket, self);
+                    udp_mutex_unlock();
+                    
                     self->getTime ();
                 }
             }
@@ -617,7 +633,7 @@ void NTPClient::getTime () {
             dnsErrors = 0;
             if (manageWifi) {
                 DEBUGLOGW ("Reconnecting WiFi");
-                WiFi.reconnect ();
+                connectionReconnect ();
             }
         }
         return;
@@ -647,7 +663,11 @@ void NTPClient::getTime () {
     ntpAddr.addr = ntpServerIPAddress;
 #endif
     DEBUGLOGI ("NTP server IP address %s", ipaddr_ntoa (&ntpAddr));
+    
+    udp_mutex_lock();
     result = udp_connect (udp, &ntpAddr, DEFAULT_NTP_PORT);
+    udp_mutex_unlock();
+    
     if (result == ERR_USE) {
         DEBUGLOGE ("Port already used");
         if (onSyncEvent) {
@@ -696,8 +716,9 @@ void NTPClient::getTime () {
         event.info.port = DEFAULT_NTP_PORT;
         onSyncEvent (event);
     }
+    //udp_mutex_lock();
     //udp_disconnect (udp);
-    
+    //udp_mutex_unlock();
 }
 
 boolean NTPClient::sendNTPpacket () {
@@ -745,7 +766,11 @@ boolean NTPClient::sendNTPpacket () {
 
     DEBUGLOGI ("Sending packet");
     memcpy (buffer->payload, &packet, sizeof (NTPUndecodedPacket_t));
+    
+    udp_mutex_lock();
     result = udp_send (udp, buffer);
+    udp_mutex_unlock();
+    
     if (buffer->ref > 0) {
 #ifdef ESP32
         DEBUGLOGV ("pbuff type: %d", buffer->type_internal);
@@ -889,7 +914,6 @@ void NTPClient::dumpNtpPacketInfo (NTPPacket_t* decPacket) {
 }
 
 NTPPacket_t* NTPClient::decodeNtpMessage (uint8_t* messageBuffer, size_t length, NTPPacket_t* decPacket) {
-    NTPUndecodedPacket_t recPacket;
     int32_t timestamp_s;
     uint32_t timestamp_us;
 
@@ -1011,7 +1035,7 @@ bool NTPClient::checkNTPresponse (NTPPacket_t* ntpPacket, int64_t offsetUs) {
         return false;
     }
     
-    if (ntpPacket->flags.vers != 4) {
+    if (ntpPacket->flags.vers < NTP_MIN_VER) {
         DEBUGLOGE ("NTP version error: %d", ntpPacket->flags.vers);
         return false;
     }
@@ -1200,4 +1224,24 @@ char* NTPClient::ntpEvent2str (NTPEvent_t e) {
     }
 
     return result;
+}
+
+
+/// weak functions to get connection status, reconnect and IP address of device
+extern "C"
+{
+  bool connectionStatus() __attribute__ ((weak, alias("__connectionStatus")));
+  bool __connectionStatus() {
+    return WiFi.isConnected ();
+  }
+  
+  bool connectionReconnect() __attribute__ ((weak, alias("__connectionReconnect")));
+  bool __connectionReconnect() {
+    return WiFi.reconnect ();
+  }
+  
+  IPAddress getDeviceIP() __attribute__ ((weak, alias("__getDeviceIP")));
+  IPAddress __getDeviceIP() {
+    return WiFi.localIP ();
+  }
 }
