@@ -293,7 +293,7 @@
 #define TZ_Asia_Taipei	PSTR("CST-8")
 #define TZ_Asia_Tashkent	PSTR("<+05>-5")
 #define TZ_Asia_Tbilisi	PSTR("<+04>-4")
-#define TZ_Asia_Tehran	PSTR("<+0330>-3:30<+0430>,J79/24,J263/24")
+#define TZ_Asia_Tehran PSTR("<+0330>-3:30")
 #define TZ_Asia_Thimphu	PSTR("<+06>-6")
 #define TZ_Asia_Tokyo	PSTR("JST-9")
 #define TZ_Asia_Tomsk	PSTR("<+07>-7")
