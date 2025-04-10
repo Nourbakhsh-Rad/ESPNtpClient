@@ -27,8 +27,13 @@ extern "C" {
 #include "sys/time.h"
 #include "time.h"
 #include "lwip/udp.h"
-#include "lwip/ip_addr.h"
 }
+
+#ifdef ESP32
+#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0))
+#include "lwip/priv/tcpip_priv.h"
+#endif
+#endif
 
 #ifdef ESP32
 #include "TZdef.h"
@@ -36,8 +41,12 @@ extern "C" {
 #include "TZ.h"
 #endif
 
+
+constexpr auto NTP_MIN_VER = 3; /// 
+
 constexpr auto DEFAULT_NTP_SERVER = "pool.ntp.org"; ///< @brief Default international NTP server. I recommend you to select a closer server to get better accuracy
 constexpr auto DEFAULT_NTP_PORT = 123; ///< @brief Default local udp port. Select a different one if neccesary (usually not needed)
+constexpr auto DEFAULT_LOCAL_PORT = 12323; /// 
 constexpr auto DEFAULT_NTP_INTERVAL = 1800; ///< @brief Default sync interval 30 minutes
 constexpr auto DEFAULT_NTP_SHORTINTERVAL = 15; ///< @brief Sync interval when sync has not been achieved. 15 seconds
 constexpr auto DEFAULT_NTP_TIMEOUT = 5000; ///< @brief Default NTP timeout ms
@@ -228,9 +237,53 @@ typedef struct {
     timeval destination; ///< Time at the client when the reply arrived from the server, in NTP timestamp format
 } NTPPacket_t;
 
+
+  /**
+    * @brief NTP Timestamp Format
+    * The prime epoch, or base date of era 0, is 0 h 1 January 1900 UTC, when all bits are zero
+    */
+typedef struct {
+    int32_t secondsOffset; ///< @brief 32-bit seconds field spanning 136 years since 1-Jan-1900 00:00 UTC
+    uint32_t fraction; ///< @brief 32-bit fraction field resolving 232 picoseconds (1/2^32)
+} timestamp64_t;
+
+  /**
+    * @brief Short NTP Timestamp Format
+    * 
+    * Used for precission, dispersion, etc
+    */
+typedef struct {
+    int16_t secondsOffset; ///< @brief 16-bit seconds field spanning 18 hours
+    uint16_t fraction; ///< @brief 16-bit fraction field resolving 15.3 microseconds (1/2^16)
+} timestamp32_t;
+
+typedef struct __attribute__ ((packed, aligned (1))) {
+    uint8_t flags;
+    uint8_t peerStratum;
+    uint8_t pollingInterval;
+    int8_t clockPrecission;
+    timestamp32_t rootDelay;
+    timestamp32_t dispersion;
+    uint8_t refID[4];
+    timestamp64_t reference;
+    timestamp64_t origin;
+    timestamp64_t receive;
+    timestamp64_t transmit;
+} NTPUndecodedPacket_t;
+
+
 typedef std::function<void (NTPEvent_t)> onSyncEvent_t; ///< @brief Event notifier callback
 
 static char strBuffer[35]; ///< @brief Temporary buffer for time and date strings
+
+/// weak functions to get connection status, reconnect and IP address of device
+extern "C"
+{
+  bool connectionStatus();
+  bool connectionReconnect();
+  IPAddress getDeviceIP();
+}
+
 
 /**
   * @brief NTPClient class
@@ -270,6 +323,9 @@ public:
     Ticker receiverTimer;           ///< @brief Timer to check received responses
 #endif
 protected:
+    NTPPacket_t lastNtpPacket;			///< 
+    NTPUndecodedPacket_t recPacket;	///< 
+    
     Ticker responseTimer;           ///< @brief Timer to trigger response timeout
     bool isConnected = false;       ///< @brief True if client has resolved correctly server IP address
     double offset;                  ///< @brief Temporary offset storage for event notify
@@ -315,12 +371,6 @@ protected:
       * @return `true` if NTP packet is good for sync
       */
     bool checkNTPresponse (NTPPacket_t* ntpPacket, int64_t offsetUs);
-    
-    /**
-      * @brief Write NTP packet data to Serial monitor
-      * @param decPacket Packet to analyze
-      */
-    void dumpNtpPacketInfo (NTPPacket_t* decPacket);
     
     /**
       * @brief Static method to call NTP response timeout processor
@@ -761,6 +811,19 @@ public:
         return numAveRounds;
     }
     
+    /**
+      * @brief Write NTP packet data to Serial monitor
+      * @param decPacket Packet to analyze
+      */
+    void dumpNtpPacketInfo (NTPPacket_t* decPacket);
+    
+    NTPPacket_t* getLastPacket () {
+    	return &lastNtpPacket;
+    }
+    
+    NTPUndecodedPacket_t* getLastPacketUn () {
+    	return &recPacket;
+    }
 };
 
 extern NTPClient NTP; ///< @brief Singleton NTPClient instance
