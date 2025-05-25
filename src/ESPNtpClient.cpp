@@ -384,7 +384,9 @@ void NTPClient::processPacket (struct pbuf* packet) {
             actualInterval = shortInterval;
             // }
             DEBUGLOGI ("Status = %s. Next sync in %d milliseconds", status == syncd ? "SYNCD" : "UNSYNCD", actualInterval);
-        }
+        } else {
+	    actualInterval = shortInterval *4;
+	}
         return;
     } else {
         numDispersionErrors = 0;
