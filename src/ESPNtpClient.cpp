@@ -1129,6 +1129,7 @@ bool NTPClient::adjustOffset (timeval* offset) {
     //     timersub (&currenttime, &_offset, &newtime);
     // }
 
+    lastSyncd = newtime;
     if (settimeofday (&newtime, (timezone*)NULL)) { // hard adjustment
         return false;
     }
@@ -1141,7 +1142,6 @@ bool NTPClient::adjustOffset (timeval* offset) {
 
     DEBUGLOGI ("Hard adjust");
 
-    lastSyncd = newtime;
     DEBUGLOGI ("Offset adjusted");
     return true;
 }
